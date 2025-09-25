@@ -3,6 +3,8 @@ import numpy as np
 import cv2
 from PIL import Image, ImageDraw, ImageFont
 
+watermarked_image = None
+
 def show_watermark_page():
    
     st.set_page_config(page_title="Image Watermark App", page_icon="🖼️", layout="wide")
@@ -35,6 +37,48 @@ def show_watermark_page():
 
         if watermark_type == "Text":
             render_watermark_text_UI(original_image, col2)
+        else:
+            render_watermark_image_UI(original_image, col2)
+
+        print('here ', watermarked_image)
+
+
+        # Download button
+        if watermarked_image is not None:
+            # Convert to bytes for download
+            print('here')
+            is_success, buffer = cv2.imencode(".png", watermarked_image)
+            if is_success:
+                st.download_button(
+                    label="Download Watermarked Image",
+                    data=buffer.tobytes(),
+                    file_name="watermarked_image.png",
+                    mime="image/png"
+                )
+
+def render_watermark_image_UI(original_image, col2):
+    st.sidebar.subheader("Image Watermark Settings")
+    watermark_file = st.sidebar.file_uploader(
+    "Choose watermark image",
+    type=['png', 'jpg'],
+    help="Upload the image to use as watermark"
+    )
+
+    if watermark_file is not None:
+        # Read watermark image
+        wm_bytes = np.asarray(bytearray(watermark_file.read()), dtype=np.uint8)
+        watermark_img = cv2.imdecode(wm_bytes, cv2.IMREAD_COLOR)
+        scale = st.sidebar.slider("Scale", 0.1, 1.0, 0.3, 0.05)
+        opacity = st.sidebar.slider("Opacity", 0.1, 1.0, 0.5, 0.1)
+        position = st.sidebar.selectbox("Position",["Top Left", "Top Right", "Bottom Left", "Bottom Right", "Center"])
+        
+        # Apply image watermark
+        global watermarked_image
+        watermarked_image = add_image_watermark(original_image, watermark_img, position, scale, opacity)
+        with col2:
+            st.subheader("Watermarked Image")
+            st.image(cv2.cvtColor(watermarked_image, cv2.COLOR_BGR2RGB), use_container_width =True)
+    
 
 
 def render_watermark_text_UI(original_image, col2):
@@ -55,6 +99,7 @@ def render_watermark_text_UI(original_image, col2):
     )
     
     if watermark_text:
+        global watermarked_image
         # Apply text watermark
         watermarked_image = add_text_watermark(
             original_image, watermark_text, position, font_size, opacity, color_rgb
@@ -64,10 +109,8 @@ def render_watermark_text_UI(original_image, col2):
             st.subheader("Watermarked Image")
             st.image(cv2.cvtColor(watermarked_image, cv2.COLOR_BGR2RGB), use_container_width =True)
 
-        
 
-
-
+   
 
 
 def add_text_watermark(image, text, position, font_size, opacity, color):
@@ -136,7 +179,7 @@ def add_text_watermark(image, text, position, font_size, opacity, color):
     return result
 
 def add_image_watermark(main_image, watermark_image, position, scale, opacity):
-    """Add image watermark to main image"""
+    """Add image watermark to main image using masks and logical operations"""
     # Resize watermark
     h_main, w_main = main_image.shape[:2]
     h_wm, w_wm = watermark_image.shape[:2]
@@ -168,15 +211,44 @@ def add_image_watermark(main_image, watermark_image, position, scale, opacity):
     if y < 0:
         y = 0
     
+    # Adjust watermark size if it extends beyond bounds
+    end_x = min(x + new_width, w_main)
+    end_y = min(y + new_height, h_main)
+    actual_width = end_x - x
+    actual_height = end_y - y
+    
+    # Crop watermark if necessary
+    watermark_cropped = watermark_resized[:actual_height, :actual_width]
+    
     # Create a copy of the main image
     result = main_image.copy()
     
-    # Add watermark with opacity
-    roi = result[y:y+new_height, x:x+new_width]
-    watermark_area = watermark_resized[:roi.shape[0], :roi.shape[1]]
+    # Create a mask for the watermark region (all white where watermark will be placed)
+    watermark_mask = np.ones((actual_height, actual_width), dtype=np.uint8) * 255
     
-    # Blend images
-    cv2.addWeighted(roi, 1-opacity, watermark_area, opacity, 0, roi)
+    # Create inverse mask
+    watermark_mask_inv = cv2.bitwise_not(watermark_mask)
+    
+    # Extract the ROI (Region of Interest) from the main image
+    roi = result[y:end_y, x:end_x]
+    
+    # Apply opacity to watermark
+    watermark_with_opacity = (watermark_cropped * opacity).astype(np.uint8)
+    
+    # Apply inverse opacity to original ROI
+    roi_dimmed = (roi * (1 - opacity)).astype(np.uint8)
+    
+    # Extract watermark region using mask
+    watermark_fg = cv2.bitwise_and(watermark_with_opacity, watermark_with_opacity, mask=watermark_mask)
+    
+    # Extract dimmed background region using mask
+    roi_bg = cv2.bitwise_and(roi_dimmed, roi_dimmed, mask=watermark_mask)
+    
+    # Combine watermark with dimmed background
+    watermark_combined = cv2.add(watermark_fg, roi_bg)
+    
+    # Place the combined result back into the main image
+    result[y:end_y, x:end_x] = watermark_combined
     
     return result
 
